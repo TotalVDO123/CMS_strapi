@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto';
 import { Writable } from 'stream';
 import { WebSocket } from 'ws';
 import { once } from 'lodash/fp';
+import chalk from 'chalk';
 import type { Struct, Utils } from '@strapi/types';
 
 import { createDispatcher, connectToWebsocket, trimTrailingSlash } from '../utils';
@@ -14,6 +15,7 @@ import type {
   TransferStage,
   Protocol,
 } from '../../../../types';
+import type { IDiagnosticReporter } from '../../../engine/diagnostic';
 import type { Client, Server, Auth } from '../../../../types/remote/protocol';
 import type { ILocalStrapiDestinationProviderOptions } from '../local-destination';
 import { TRANSFER_PATH } from '../../remote/constants';
@@ -45,6 +47,8 @@ class RemoteStrapiDestinationProvider implements IDestinationProvider {
   transferID: string | null;
 
   stats!: { [TStage in Exclude<TransferStage, 'schemas'>]: { count: number } };
+
+  #diagnostics?: IDiagnosticReporter;
 
   constructor(options: IRemoteStrapiDestinationProviderOptions) {
     this.options = options;
@@ -219,7 +223,18 @@ class RemoteStrapiDestinationProvider implements IDestinationProvider {
     });
   }
 
-  async bootstrap(): Promise<void> {
+  #reportInfo(message: string) {
+    this.#diagnostics?.report({
+      details: {
+        createdAt: new Date(),
+        message: `${chalk.cyan(`[remote-destination-provider]`)} ${message}`,
+      },
+      kind: 'info',
+    });
+  }
+
+  async bootstrap(diagnostics?: IDiagnosticReporter): Promise<void> {
+    this.#diagnostics = diagnostics;
     const { url, auth } = this.options;
     const validProtocols = ['https:', 'http:'];
 
@@ -239,6 +254,7 @@ class RemoteStrapiDestinationProvider implements IDestinationProvider {
       url.pathname
     )}${TRANSFER_PATH}/push`;
 
+    this.#reportInfo('establishing websocket connection');
     // No auth defined, trying public access for transfer
     if (!auth) {
       ws = await connectToWebsocket(wsUrl);
@@ -260,11 +276,20 @@ class RemoteStrapiDestinationProvider implements IDestinationProvider {
       });
     }
 
+    this.#reportInfo('established websocket connection');
+
     this.ws = ws;
     const { retryMessageOptions } = this.options;
-    this.dispatcher = createDispatcher(this.ws, retryMessageOptions);
 
+    this.#reportInfo('creating dispatcher');
+    this.dispatcher = createDispatcher(this.ws, retryMessageOptions, (message: string) =>
+      this.#reportInfo(message)
+    );
+    this.#reportInfo('created dispatcher');
+
+    this.#reportInfo('initialize transfer');
     this.transferID = await this.initTransfer();
+    this.#reportInfo(`initialized transfer ${this.transferID}`);
 
     this.dispatcher.setTransferProperties({ id: this.transferID, kind: 'push' });
 

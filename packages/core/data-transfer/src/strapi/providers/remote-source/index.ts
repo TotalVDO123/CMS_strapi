@@ -2,6 +2,7 @@ import { PassThrough, Readable, Writable } from 'stream';
 import type { Struct, Utils } from '@strapi/types';
 import { WebSocket } from 'ws';
 import { castArray } from 'lodash/fp';
+import chalk from 'chalk';
 
 import type {
   IAsset,
@@ -13,6 +14,7 @@ import type {
   ProviderType,
   TransferStage,
 } from '../../../../types';
+import type { IDiagnosticReporter } from '../../../engine/diagnostic';
 import { Client, Server, Auth } from '../../../../types/remote/protocol';
 import { ProviderTransferError, ProviderValidationError } from '../../../errors/providers';
 import { TRANSFER_PATH } from '../../remote/constants';
@@ -46,6 +48,8 @@ class RemoteStrapiSourceProvider implements ISourceProvider {
   }
 
   results?: ISourceProviderTransferResults | undefined;
+
+  #diagnostics?: IDiagnosticReporter;
 
   async #createStageReadStream(stage: Exclude<TransferStage, 'schemas'>) {
     const startResult = await this.#startStep(stage);
@@ -348,7 +352,19 @@ class RemoteStrapiSourceProvider implements ISourceProvider {
     return res.transferID;
   }
 
-  async bootstrap(): Promise<void> {
+  #reportInfo(message: string) {
+    console.log(this.#diagnostics);
+    this.#diagnostics?.report({
+      details: {
+        createdAt: new Date(),
+        message: `${chalk.magenta(`[remote-source-provider]`)} ${message}`,
+      },
+      kind: 'info',
+    });
+  }
+
+  async bootstrap(diagnostics?: IDiagnosticReporter): Promise<void> {
+    this.#diagnostics = diagnostics;
     const { url, auth } = this.options;
     let ws: WebSocket;
     this.assertValidProtocol(url);
@@ -357,6 +373,7 @@ class RemoteStrapiSourceProvider implements ISourceProvider {
       url.pathname
     )}${TRANSFER_PATH}/pull`;
 
+    this.#reportInfo('establishing websocket connection');
     // No auth defined, trying public access for transfer
     if (!auth) {
       ws = await connectToWebsocket(wsUrl);
@@ -378,10 +395,19 @@ class RemoteStrapiSourceProvider implements ISourceProvider {
       });
     }
 
+    this.#reportInfo('established websocket connection');
     this.ws = ws;
     const { retryMessageOptions } = this.options;
-    this.dispatcher = createDispatcher(this.ws, retryMessageOptions);
+
+    this.#reportInfo('creating dispatcher');
+    this.dispatcher = createDispatcher(this.ws, retryMessageOptions, (message: string) =>
+      this.#reportInfo(message)
+    );
+    this.#reportInfo('creating dispatcher');
+
+    this.#reportInfo('initialize transfer');
     const transferID = await this.initTransfer();
+    this.#reportInfo(`initialized transfer ${transferID}`);
 
     this.dispatcher.setTransferProperties({ id: transferID, kind: 'pull' });
     await this.dispatcher.dispatchTransferAction('bootstrap');
